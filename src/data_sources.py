@@ -71,7 +71,11 @@ def _parse_cpi_csv(content: bytes | str) -> pd.Series:
     if len(cpi) < 24:
         raise ValueError("CPI 有效月度观测不足 24 条。")
     cpi.index = cpi["date"].dt.to_period("M")
-    return cpi["cpi"].rename(FRED_SERIES_NAME)
+    series = cpi["cpi"].rename(FRED_SERIES_NAME)
+    series = series[~series.index.duplicated(keep="last")]
+    # 中间缺失的月份（如 2025-10）用前一个月的值补齐
+    full_index = pd.period_range(series.index.min(), series.index.max(), freq="M")
+    return series.reindex(full_index).ffill().rename(FRED_SERIES_NAME)
 
 
 def _load_cpi_file(path: Path) -> pd.Series:
@@ -89,16 +93,19 @@ def _extend_to_current_month(series: pd.Series) -> pd.Series:
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
-def load_us_cpi() -> tuple[pd.Series, str]:
-    """只读本地 CPI 文件：优先用月份最新的一份，缺失月份沿用最近值。不联网。"""
+def load_us_cpi() -> pd.Series:
+    """只读本地 CPI 文件：优先用月份最新的一份，缺失月份沿用最近值。不联网。
+
+    只返回一个 Series，与 app.py 中 `cpi = load_us_cpi()` 兼容。
+    """
     failures: list[str] = []
-    best_series, best_name = None, ""
+    best_series = None
     for name, path in [("本地缓存 CPI", CACHE_CPI_PATH), ("随程序附带的离线 CPI", BUNDLED_CPI_PATH)]:
         try:
             if path.exists():
                 s = _load_cpi_file(path)
                 if best_series is None or s.index.max() > best_series.index.max():
-                    best_series, best_name = s, name
+                    best_series = s
         except Exception as exc:
             failures.append(f"{name}：{exc}")
 
@@ -108,8 +115,7 @@ def load_us_cpi() -> tuple[pd.Series, str]:
             + f"。请将 CPIAUCNS CSV 放入：{BUNDLED_CPI_PATH}"
         )
 
-    last = best_series.index.max()
-    return _extend_to_current_month(best_series), f"{best_name}（最新到 {last}，之后月份沿用该值）"
+    return _extend_to_current_month(best_series)
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
